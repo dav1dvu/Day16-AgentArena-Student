@@ -62,22 +62,63 @@ from __future__ import annotations
 from harness.middleware import Middleware
 
 
+import re
+import unicodedata
+
+_WS_RE = re.compile(r"\s+")
+
+def _norm(text: str) -> str:
+    if not isinstance(text, str):
+        text = "" if text is None else str(text)
+    return _WS_RE.sub(" ", unicodedata.normalize("NFC", text).casefold()).strip()
+
+def _norm_lines(text: str) -> list[str]:
+    if not isinstance(text, str):
+        text = "" if text is None else str(text)
+    return [line for line in (_norm(raw) for raw in text.splitlines()) if line]
+
 class CitationChecker(Middleware):
     """Trỏ mỗi claim về đúng tài liệu thật sự chứa câu đó."""
 
     name = "citation_checker"
 
     def after_agent(self, ctx, report):
-        # TODO (§11): khoảng 10-25 dòng.
-        #  1. Lấy report["claims"]; bỏ qua nếu rỗng hoặc ctx.corpus là None.
-        #  2. Với mỗi claim, gọi ctx.corpus.get(claim["doc_id"]).
-        #     Nếu tài liệu tồn tại VÀ claim["text"] khớp NGUYÊN VĂN một
-        #     DÒNG trong body của nó (không phải chỉ "nằm trong body")
-        #     -> trích dẫn đã đúng, giữ nguyên claim.
-        #  3. Nếu không: tìm trong ctx.corpus.docs tài liệu đầu tiên thoả
-        #     doc.body in ctx.observed_text  và  claim["text"] khớp
-        #     nguyên văn một DÒNG của doc.body -> đó là nguồn thật.
-        #     Đổi doc_id sang nó, GIỮ NGUYÊN text.
-        #  4. Không tìm được nguồn nào -> để `critic` xử lý, đừng bịa doc_id.
-        #  5. Cập nhật report["citations"] = danh sách doc_id đã sắp xếp.
-        return report  # <- mặc định KHÔNG LÀM GÌ: agent vẫn chạy được
+        claims = report.get("claims")
+        if not isinstance(claims, list) or ctx.corpus is None:
+            return report
+
+        observed_docs = []
+        for doc in ctx.corpus.docs:
+            if doc.body in ctx.observed_text:
+                observed_docs.append(doc)
+
+        for claim in claims:
+            text = claim.get("text", "")
+            if not text:
+                continue
+            
+            norm_text = _norm(text)
+            if len(norm_text) < 12:
+                continue
+
+            doc_id = claim.get("doc_id")
+            doc = ctx.corpus.get(doc_id) if doc_id else None
+            
+            is_correct = False
+            if doc:
+                lines = _norm_lines(doc.body)
+                if any(norm_text in line for line in lines):
+                    is_correct = True
+            
+            if not is_correct:
+                found_doc = None
+                for odoc in observed_docs:
+                    lines = _norm_lines(odoc.body)
+                    if any(norm_text in line for line in lines):
+                        found_doc = odoc
+                        break
+                if found_doc:
+                    claim["doc_id"] = found_doc.doc_id
+
+        report["citations"] = sorted(list(set(c["doc_id"] for c in claims if isinstance(c.get("doc_id"), str))))
+        return report

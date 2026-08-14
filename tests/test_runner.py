@@ -667,6 +667,7 @@ def test_a_gigantic_model_output_still_yields_a_scoreable_run():
         ("many real finals", "\n".join(['FINAL: {"answer": "a", "claims": []}'] * 5_000)),
         ("deep brackets", "FINAL: " + "[" * 2_000 + "]" * 2_000),
     ],
+    ids=lambda val: val if isinstance(val, str) and len(val) < 100 else "long_text"
 )
 def test_normalisation_is_bounded_on_pathological_output(name, text):
     """A per-turn cost, so it must stay milliseconds even on hostile
@@ -1236,10 +1237,13 @@ def test_a_fixed_clock_makes_even_the_timing_deterministic():
 
 
 def _script(name, *args, expect=0):
+    import os
+    env = dict(os.environ)
+    env["PYTHONIOENCODING"] = "utf-8"
     proc = subprocess.run(
         [sys.executable, f"scripts/{name}", *args],
-        capture_output=True, text=True, cwd=str(LAB_ROOT),
-        env={"PATH": "/usr/bin:/bin"},
+        capture_output=True, encoding="utf-8", cwd=str(LAB_ROOT),
+        env=env,
     )
     assert proc.returncode == expect, (proc.returncode, proc.stdout[-2000:], proc.stderr[-2000:])
     return proc
@@ -1317,10 +1321,13 @@ def test_a_score_file_tagged_baseline_is_used_as_the_baseline(tmp_path):
 def test_run_practice_refuses_the_real_path_without_credentials():
     """No silent fall back to the mock: a scored round that quietly
     stopped being scored is worse than one that failed loudly."""
+    import os
+    env = {k: v for k, v in os.environ.items() if k not in ("ARENA_API_KEY", "ARENA_BASE_URL", "GEMINI_API_KEY")}
+    env["PYTHONIOENCODING"] = "utf-8"
     proc = subprocess.run(
         [sys.executable, "scripts/run_practice.py", "--model", "real", "--brief",
          "pub-01-sla-hien-hanh"],
-        capture_output=True, text=True, cwd=str(LAB_ROOT), env={"PATH": "/usr/bin:/bin"},
+        capture_output=True, encoding="utf-8", cwd=str(LAB_ROOT), env=env,
     )
     assert proc.returncode != 0
     combined = proc.stdout + proc.stderr

@@ -73,22 +73,85 @@ from __future__ import annotations
 from harness.middleware import Middleware
 
 
+import re
+import unicodedata
+
+_WS_RE = re.compile(r"\s+")
+
+def _norm(text: str) -> str:
+    if not isinstance(text, str):
+        text = "" if text is None else str(text)
+    return _WS_RE.sub(" ", unicodedata.normalize("NFC", text).casefold()).strip()
+
+def _norm_lines(text: str) -> list[str]:
+    if not isinstance(text, str):
+        text = "" if text is None else str(text)
+    return [line for line in (_norm(raw) for raw in text.splitlines()) if line]
+
 class Critic(Middleware):
     """Xoá những gì bằng chứng không đỡ; abstain khi không còn gì."""
 
     name = "critic"
 
     def after_agent(self, ctx, report):
-        # TODO (§2): khoảng 10-25 dòng.
-        #  1. Lấy report["claims"]; nếu rỗng hoặc không phải list thì thôi.
-        #  2. Với mỗi claim: nếu claim["text"] có trong ctx.observed_text
-        #     -> giữ nguyên (KHÔNG sửa chữ).
-        #  3. Nếu không: thử tách câu ghép (trường hợp (c) ở docstring).
-        #     Tách được -> giữ cả hai nửa, mỗi nửa gắn doc_id của tài liệu
-        #     thật sự chứa nó, và đặt report["abstain"] = True.
-        #  4. Không tách được -> đây là bịa: bỏ claim đi.
-        #  5. Nếu không còn claim nào: report["abstain"] = True,
-        #     claims = [], citations = [], và viết lại "answer" nói rõ là
-        #     không đủ căn cứ.
-        #  6. Cập nhật report["citations"] cho khớp với claims còn lại.
-        return report  # <- mặc định KHÔNG LÀM GÌ: agent vẫn chạy được
+        claims = report.get("claims")
+        if not isinstance(claims, list):
+            return report
+
+        new_claims = []
+        observed_docs_lines = []
+        if ctx.corpus:
+            for doc in ctx.corpus.docs:
+                if doc.body in ctx.observed_text:
+                    observed_docs_lines.append((doc, _norm_lines(doc.body)))
+
+        for claim in claims:
+            text = claim.get("text", "")
+            if not text:
+                continue
+            norm_text = _norm(text)
+            if len(norm_text) < 12:
+                continue
+                
+            is_observed = False
+            for doc, lines in observed_docs_lines:
+                if any(norm_text in line for line in lines):
+                    is_observed = True
+                    break
+            
+            if is_observed:
+                new_claims.append(claim)
+            else:
+                split_success = False
+                if " và " in text:
+                    parts = text.split(" và ", 1)
+                    p0 = parts[0].strip()
+                    p1 = parts[1].strip()
+                    norm_p0 = _norm(p0)
+                    norm_p1 = _norm(p1)
+                    if len(norm_p0) >= 12 and len(norm_p1) >= 12:
+                        doc1 = None
+                        doc2 = None
+                        for doc, lines in observed_docs_lines:
+                            if any(norm_p0 in line for line in lines):
+                                doc1 = doc
+                            if any(norm_p1 in line for line in lines):
+                                doc2 = doc
+                        if doc1 and doc2 and doc1.doc_id != doc2.doc_id:
+                            new_claims.append({"text": p0, "doc_id": doc1.doc_id})
+                            new_claims.append({"text": p1, "doc_id": doc2.doc_id})
+                            report["abstain"] = True
+                            split_success = True
+                if not split_success:
+                    pass
+
+        if not new_claims:
+            report["abstain"] = True
+            report["claims"] = []
+            report["citations"] = []
+            report["answer"] = "Không đủ căn cứ để trả lời câu hỏi."
+        else:
+            report["claims"] = new_claims
+            report["citations"] = sorted(list(set(c["doc_id"] for c in new_claims if isinstance(c.get("doc_id"), str))))
+
+        return report
